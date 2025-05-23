@@ -96,9 +96,9 @@ class PrioritizedReplayBuffer:
         self.size = 0
         self.next_idx = 0
         
-        # Initialize buffers with proper shapes
-        self.states = np.zeros((buffer_size, *state_shape), dtype=np.float32)
-        self.next_states = np.zeros((buffer_size, *state_shape), dtype=np.float32)
+        # Initialize buffers with proper shapes (use uint8 for memory efficiency)
+        self.states = np.zeros((buffer_size, *state_shape), dtype=np.uint8)
+        self.next_states = np.zeros((buffer_size, *state_shape), dtype=np.uint8)
         self.actions = np.zeros((buffer_size, 1), dtype=np.int64)
         self.rewards = np.zeros((buffer_size, 1), dtype=np.float32)
         self.dones = np.zeros((buffer_size, 1), dtype=np.uint8)
@@ -111,17 +111,17 @@ class PrioritizedReplayBuffer:
     def push(self, state, action, reward, next_state, done):
         """Add a new experience to memory with maximum priority."""
         max_priority = self.priorities.max() if self.size > 0 else 1.0
-        
-        # Store experience components
-        self.states[self.pos] = state
+
+        # Store experience components as uint8 for states/next_states
+        self.states[self.pos] = state.astype(np.uint8)
         self.actions[self.pos] = action
         self.rewards[self.pos] = reward
-        self.next_states[self.pos] = next_state
+        self.next_states[self.pos] = next_state.astype(np.uint8)
         self.dones[self.pos] = done
-        
+
         # Set max priority for new experience
         self.priorities[self.pos] = max_priority
-        
+
         # Update position and size
         self.pos = (self.pos + 1) % self.buffer_size
         self.size = min(self.size + 1, self.buffer_size)
@@ -157,14 +157,14 @@ class PrioritizedReplayBuffer:
         weights /= weights.max()  # Normalize to have max weight = 1
         weights = np.array(weights, dtype=np.float32).reshape(-1, 1)
         
-        # Convert to torch tensors
-        states = torch.from_numpy(self.states[indices]).float().to(self.device)
+        # Convert to torch tensors, cast states/next_states to float32 at sample time
+        states = torch.from_numpy(self.states[indices].astype(np.float32)).to(self.device)
         actions = torch.from_numpy(self.actions[indices]).long().to(self.device)
         rewards = torch.from_numpy(self.rewards[indices]).float().to(self.device)
-        next_states = torch.from_numpy(self.next_states[indices]).float().to(self.device)
+        next_states = torch.from_numpy(self.next_states[indices].astype(np.float32)).to(self.device)
         dones = torch.from_numpy(self.dones[indices]).float().to(self.device)
         weights = torch.from_numpy(weights).float().to(self.device)
-        
+
         return states, actions, rewards, next_states, dones, weights, indices
     
     def update_priorities(self, indices, priorities):

@@ -212,7 +212,9 @@ if __name__ == "__main__":
         eps_history.append(agent.epsilon) # save epsilon value
         avg_scores.append(np.mean(scores_window)) # save average score        # Print progress with completion percentage
         progress_pct = (total_steps / TOTAL_FRAMES_TO_TRAIN) * 100
-        print(f'Episode {i_episode}\tScore: {score:.1f} | Avg: {np.mean(scores_window):.1f} | Frames: {total_steps}/{TOTAL_FRAMES_TO_TRAIN} ({progress_pct:.1f}%) | Eps: {agent.epsilon:.2f}')
+        # Clamp progress_pct to a maximum of 100.0 for display
+        display_progress_pct = min(progress_pct, 100.0)
+        print(f'Episode {i_episode}\tScore: {score:.1f} | Avg: {np.mean(scores_window):.1f} | Frames: {total_steps}/{TOTAL_FRAMES_TO_TRAIN} ({display_progress_pct:.1f}%) | Eps: {agent.epsilon:.2f}')
         
         # Save a more frequent record of training progress
         if total_steps % 50000 == 0:  # Every 50K frames, save checkpoint and progress
@@ -237,6 +239,16 @@ if __name__ == "__main__":
     print("\nTraining finished.")
     env.close()
 
+    # --- Log and print total training time ---
+    total_training_time = time.time() - start_time
+    hours, rem = divmod(total_training_time, 3600)
+    minutes, seconds = divmod(rem, 60)
+    time_str = f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d} (hh:mm:ss)"
+    print(f"Total wall-clock training time: {time_str} ({total_training_time:.2f} seconds)")
+    # Save to a text file for later analysis
+    with open(os.path.join(LOG_DIR, "training_time.txt"), "w") as f:
+        f.write(f"Total training time: {time_str} ({total_training_time:.2f} seconds)\n")
+
     # --- Plotting ---
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -252,3 +264,11 @@ if __name__ == "__main__":
     plt.savefig(plot_save_path)
     print(f"Score plot saved to {plot_save_path}")
     # plt.show() # Uncomment to display plot immediately
+
+    # --- Generate and save all summary plots/statistics ---
+    try:
+        from utils import create_training_summary
+        create_training_summary(log_file="training_log.csv", output_dir=LOG_DIR)
+        print(f"Training summary and plots saved in {LOG_DIR}")
+    except Exception as e:
+        print(f"Could not generate training summary: {e}")

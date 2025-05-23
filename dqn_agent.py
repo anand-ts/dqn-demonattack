@@ -13,7 +13,7 @@ from replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
 from collections import deque
 
 # --- Hyperparameters ---
-BUFFER_SIZE = int(1e6)  # memory capacity (1 million)
+BUFFER_SIZE = int(1e5)  # memory capacity changed to 1e5 (was 1e6)
 BATCH_SIZE = 32         # batch size for gradient updates (as per original DQN)
 GAMMA = 0.99            # discount factor
 LR = 2.5e-4             # learning rate (0.00025 as per original)
