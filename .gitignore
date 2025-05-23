@@ -1,2 +1,38 @@
-__pycache__
-debug_viz
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Virtual envs
+venv/
+.venv/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Environment & misc
+.env.local
+.env.*.local
+.DS_Store
+
+# IDE settings
+.vscode/*
+!/.vscode/extensions.json
+.idea/
+
+# Project artifacts
+debug_viz/
+dqn.pdf
+/models/
+/results/

@@ -13,7 +13,7 @@ import ale_py
 from dqn_agent import DQNAgent, BATCH_SIZE  # Import BATCH_SIZE from dqn_agent.py
 from debug_utils import print_tensor_info, visualize_state
 
-plt.ion()  # Turn on interactive mode for real-time plotting
+# plt.ion()  # Turn on interactive mode for real-time plotting
 
 # --- Environment Setup ---
 # Register ALE environments if not already registered
@@ -22,28 +22,34 @@ try:
     # Try to import DemonAttack to see if it's already registered
     gym.make("ALE/DemonAttack-v5")
 except gym.error.NameNotFound:
-    # If not found, register ALE environments
-    for game in ale_py.list_games():
-        for dtype in ["", "-ram"]:
-            register(
-                id=f"ALE/{game}{dtype}-v5",
-                entry_point="gymnasium.envs.atari:AtariEnv",
-                kwargs={"game": game, "obs_type": "ram" if dtype == "-ram" else "rgb", "repeat_action_probability": 0.25},
-                max_episode_steps=108000,
-                nondeterministic=True,
-            )
+    # If not found, register the DemonAttack environment manually
+    register(
+        id="ALE/DemonAttack-v5",
+        entry_point="gymnasium.envs.atari:AtariEnv",
+        kwargs={"game": "demon_attack", "obs_type": "rgb", "repeat_action_probability": 0.25},
+        max_episode_steps=108000,
+        nondeterministic=True,
+    )
+    register(
+        id="ALE/DemonAttack-ram-v5",
+        entry_point="gymnasium.envs.atari:AtariEnv",
+        kwargs={"game": "demon_attack", "obs_type": "ram", "repeat_action_probability": 0.25},
+        max_episode_steps=108000,
+        nondeterministic=True,
+    )
 
 # Use the correct environment name
 ENV_NAME = "ALE/DemonAttack-v5"  # Standard version
 
 # --- Configuration / Hyperparameters ---
-NUM_EPISODES = 2000      # Max number of training episodes
-MAX_T = 10000           # Max number of timesteps per episode (optional)
-PRINT_EVERY = 10        # How often to print avg score
-SAVE_EVERY = 100        # How often to save the model checkpoint
+# NUM_EPISODES = 100      # Old: Limited episodes approach
+TOTAL_FRAMES_TO_TRAIN = 1000000  # Start with 1M frames (paper used 10M)
+MAX_T = 10000           # Max number of timesteps per episode
+PRINT_EVERY = 1         # Print every episode
+SAVE_EVERY = 100        # Save every 100 episodes (less frequent for long training)
+PLOT_EVERY = 100        # Plot less frequently for long training
 LOG_DIR = "results"     # Directory for logs and plots
 MODEL_DIR = "models"    # Directory for saved models
-PLOT_EVERY = 50         # How often to update the training plot
 
 # Create directories if they don't exist
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -61,8 +67,8 @@ def make_env(env_id, seed=None, render_mode=None):
     env = gym.wrappers.ResizeObservation(env, (84, 84))
     env = gym.wrappers.GrayscaleObservation(env)
     
-    # Use MaxAndSkip wrapper for frame skipping
-    env = gym.wrappers.MaxAndSkipObservation(env, skip=4)
+    # Frame skipping as per original DQN paper (k=4)
+    env = gym.wrappers.MaxAndSkipObservation(env, skip=4)  # Changed back to 4 as per original paper
     
     # Use the renamed FrameStackObservation wrapper
     env = gym.wrappers.FrameStackObservation(env, 4)
@@ -72,13 +78,17 @@ def make_env(env_id, seed=None, render_mode=None):
         def __init__(self, env):
             super().__init__(env)
             obs_shape = self.observation_space.shape
-            # Change from (H, W, C) to (C, H, W)
-            self.observation_space = gym.spaces.Box(
-                low=0, 
-                high=255, 
-                shape=(obs_shape[2], obs_shape[0], obs_shape[1]),
-                dtype=np.uint8
-            )
+            # Fix for shape access - handle potential None value
+            if obs_shape is not None and len(obs_shape) >= 3:
+                # Change from (H, W, C) to (C, H, W)
+                self.observation_space = gym.spaces.Box(
+                    low=0, 
+                    high=255, 
+                    shape=(obs_shape[2], obs_shape[0], obs_shape[1]),
+                    dtype=np.uint8
+                )
+            else:
+                print("Warning: Unexpected observation shape:", obs_shape)
         
         def observation(self, observation):
             # Transpose from (H, W, C) to (C, H, W)
@@ -104,7 +114,19 @@ if __name__ == "__main__":
     # Create environment without rendering for training
     env = make_env(ENV_NAME)
     state_shape = env.observation_space.shape
-    num_actions = env.action_space.n
+    
+    # Ensure we can safely access state_shape and action_space.n
+    if state_shape is None:
+        raise ValueError("Observation space shape is None!")
+    
+    # Safe access to num_actions with proper type annotation
+    from gymnasium.spaces import Discrete
+    if isinstance(env.action_space, Discrete):
+        num_actions = env.action_space.n
+    else:
+        print("Warning: action_space is not a Discrete space. Using default value of 4.")
+        num_actions = 4  # Default to 4 actions for Atari
+    
     print(f"State shape from space: {state_shape}, Number of actions: {num_actions}")
     
     # IMPORTANT: Use the state_shape directly since it's already in the correct format (4, 84, 84)
@@ -124,14 +146,18 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # Create a figure for real-time plotting
-    plt.figure(figsize=(12, 5))
-    ax1 = plt.subplot(121)
-    ax2 = plt.subplot(122)
-    plt.suptitle('DQN Training Progress')
-    plt.show(block=False)
+    # plt.figure(figsize=(12, 5))
+    # ax1 = plt.subplot(121)
+    # ax2 = plt.subplot(122)
+    # plt.suptitle(\'DQN Training Progress\')
+    # plt.show(block=False)
 
     print("Starting Training...")
-    for i_episode in range(1, NUM_EPISODES + 1):
+    total_steps = 0
+    i_episode = 0
+
+    while total_steps < TOTAL_FRAMES_TO_TRAIN:
+        i_episode += 1
         state, info = env.reset() # Gymnasium returns state, info
         score = 0
         episode_steps = 0
@@ -147,6 +173,9 @@ if __name__ == "__main__":
             
             action = agent.select_action(state)
             next_state, reward, terminated, truncated, info = env.step(action)
+            # clip reward to [-1,1] for lower variance
+            reward_float = float(reward)  # Convert to scalar float if it's not already
+            reward_clipped = max(-1.0, min(1.0, reward_float))  # Manual clipping to avoid np.clip issues with scalars
             done = terminated or truncated # Episode ends if terminated or truncated
 
             # Again ensure next_state is in the correct shape
@@ -154,15 +183,15 @@ if __name__ == "__main__":
                 if next_state.shape[0] != 4 and next_state.shape[2] == 4:
                     next_state = np.transpose(next_state, (2, 0, 1))
 
-            # Store experience
-            agent.memory.push(state, action, reward, next_state, done)
+            # Store experience in replay buffer
+            agent.step(state, action, reward_clipped, next_state, done)
 
-            # Learn only if enough samples and limit how often we call learn()
+            # Learn after every agent step, as per original paper (if buffer is large enough)
             if len(agent.memory) >= BATCH_SIZE:
                 agent.learn()
             
             state = next_state
-            score += reward
+            score += reward_clipped
             total_steps += 1
             episode_steps += 1
 
@@ -174,37 +203,21 @@ if __name__ == "__main__":
         scores_window.append(score)       # save most recent score
         scores.append(score)              # save most recent score
         eps_history.append(agent.epsilon) # save epsilon value
-        avg_scores.append(np.mean(scores_window)) # save average score
-
-        # Print progress after EVERY episode
-        print(f'Episode {i_episode}/{NUM_EPISODES} | Score: {score:.1f} | Avg: {np.mean(scores_window):.1f} | '
-              f'Steps: {episode_steps} | Eps: {agent.epsilon:.2f} | Time: {episode_time:.1f}s')
+        avg_scores.append(np.mean(scores_window)) # save average score        # Print progress with completion percentage
+        progress_pct = (total_steps / TOTAL_FRAMES_TO_TRAIN) * 100
+        print(f'Episode {i_episode}\tScore: {score:.1f} | Avg: {np.mean(scores_window):.1f} | Frames: {total_steps}/{TOTAL_FRAMES_TO_TRAIN} ({progress_pct:.1f}%) | Eps: {agent.epsilon:.2f}')
         
-        # Update the plots periodically
-        if i_episode % PLOT_EVERY == 0:
-            ax1.clear()
-            ax2.clear()
-            
-            # Plot scores
-            ax1.plot(scores, alpha=0.6, label='Score')
-            ax1.plot(avg_scores, label='Avg Score (100 ep)')
-            ax1.set_xlabel('Episode')
-            ax1.set_ylabel('Score')
-            ax1.legend()
-            ax1.set_title('Training Scores')
-            
-            # Plot epsilon
-            ax2.plot(eps_history)
-            ax2.set_xlabel('Episode')
-            ax2.set_ylabel('Epsilon')
-            ax2.set_title('Exploration Rate')
-            
-            plt.tight_layout()
-            plt.pause(0.1)  # Pause to update the plot
-            
+        # Save a more frequent record of training progress
+        if total_steps % 50000 == 0:  # Every 50K frames, save checkpoint and progress
             # Save current data
             np.save(os.path.join(LOG_DIR, 'scores.npy'), np.array(scores))
             np.save(os.path.join(LOG_DIR, 'eps_history.npy'), np.array(eps_history))
+            np.save(os.path.join(LOG_DIR, 'frames.npy'), np.array([total_steps]))
+            
+            # Save checkpoint more frequently based on frames
+            model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_frames_{total_steps}.pth")
+            agent.save(model_save_path)
+            print(f"Progress checkpoint saved at {total_steps} frames.")
 
         # Save model checkpoint
         if i_episode % SAVE_EVERY == 0:
