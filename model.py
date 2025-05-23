@@ -55,10 +55,11 @@ class NoisyLinear(nn.Module):
 class QNetwork(nn.Module):
     """Dueling DQN Network."""
 
-    def __init__(self, input_shape, num_actions):
+    def __init__(self, input_shape, num_actions, use_noisy=False):
         super(QNetwork, self).__init__()
         self.input_shape = input_shape
         self.num_actions = num_actions
+        self.use_noisy = use_noisy
 
         channels = input_shape[0]
         print(f"Using {channels} input channels (Dueling DQN)")
@@ -75,10 +76,16 @@ class QNetwork(nn.Module):
         conv_out_size = int(np.prod(o.size()))
 
         # Dueling streams
-        self.fc_adv = nn.Linear(conv_out_size, 256)
-        self.fc_val = nn.Linear(conv_out_size, 256)
-        self.advantage = nn.Linear(256, num_actions)
-        self.value = nn.Linear(256, 1)
+        if use_noisy:
+            self.fc_adv = NoisyLinear(conv_out_size, 256)
+            self.fc_val = NoisyLinear(conv_out_size, 256)
+            self.advantage = NoisyLinear(256, num_actions)
+            self.value = NoisyLinear(256, 1)
+        else:
+            self.fc_adv = nn.Linear(conv_out_size, 256)
+            self.fc_val = nn.Linear(conv_out_size, 256)
+            self.advantage = nn.Linear(256, num_actions)
+            self.value = nn.Linear(256, 1)
 
     def forward(self, x):
         # Input normalization

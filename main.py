@@ -120,7 +120,15 @@ def make_env(env_id, seed=None, render_mode=None):
     return env
 
 # --- Main Training Loop ---
+
+import argparse
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint .pth file to resume training')
+    parser.add_argument('--resume-frames', type=int, default=None, help='Manually specify total frames when resuming from an old checkpoint')
+    parser.add_argument('--noisy', action='store_true', help='Enable NoisyNets for exploration (overrides epsilon-greedy)')
+    args = parser.parse_args()
 
     # Set device, preferring MPS on Apple Silicon
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
@@ -155,14 +163,53 @@ if __name__ == "__main__":
     proper_input_shape = state_shape
     print(f"Input shape for model: {proper_input_shape}")
     
-    # Create Agent with the correct shape
-    agent = DQNAgent(input_shape=proper_input_shape, num_actions=num_actions, device=device)
 
-    scores = []                         # list containing scores from each episode
-    scores_window = deque(maxlen=100)   # last 100 scores for moving average
-    eps_history = []                    # list containing epsilon values
-    avg_scores = []                     # list containing average scores
-    total_steps = 0
+    # Create Agent with the correct shape
+    agent = DQNAgent(input_shape=proper_input_shape, num_actions=num_actions, device=device, use_noisy=args.noisy)
+
+    # --- Resume logic ---
+    resume_episode = 0
+    resume_total_steps = 0
+    if args.resume is not None:
+        print(f"Resuming training from checkpoint: {args.resume}")
+        checkpoint = agent.load(args.resume)
+        # Try to parse episode or frame from filename
+        import re
+        m = re.search(r'episode_(\d+)', args.resume)
+        if m:
+            resume_episode = int(m.group(1))
+        # Priority: use --resume-frames if provided
+        if args.resume_frames is not None:
+            resume_total_steps = int(args.resume_frames)
+            print(f"Using manually specified total_steps: {resume_total_steps}")
+        # Otherwise, use total_steps from checkpoint if present
+        elif checkpoint is not None and 'total_steps' in checkpoint:
+            resume_total_steps = int(checkpoint['total_steps'])
+        else:
+            m = re.search(r'frames_(\d+)', args.resume)
+            if m:
+                resume_total_steps = int(m.group(1))
+            else:
+                # Fallback: try to load from frames.npy if it exists
+                import numpy as np
+                import os
+                frames_path = os.path.join(LOG_DIR, 'frames.npy')
+                if os.path.exists(frames_path):
+                    try:
+                        arr = np.load(frames_path)
+                        if isinstance(arr, np.ndarray) and arr.size > 0:
+                            resume_total_steps = int(arr[-1])
+                    except Exception as e:
+                        print(f"Warning: Could not load frames.npy: {e}")
+        print(f"Resuming from episode {resume_episode}, total_steps {resume_total_steps}")
+
+    # Optionally, try to load scores and epsilon history if resuming
+    scores = []
+    scores_window = deque(maxlen=100)
+    eps_history = []
+    avg_scores = []
+    total_steps = resume_total_steps
+    i_episode = resume_episode
 
     start_time = time.time()
 
@@ -174,10 +221,12 @@ if __name__ == "__main__":
     # plt.show(block=False)
 
     print("Starting Training...")
-    total_steps = 0
-    i_episode = 0
 
-    while total_steps < TOTAL_FRAMES_TO_TRAIN:
+    # If resuming, adjust the frame budget so we only train for the remaining frames
+    frames_remaining = TOTAL_FRAMES_TO_TRAIN - total_steps
+    final_frame_target = total_steps + frames_remaining
+
+    while total_steps < final_frame_target:
         i_episode += 1
         state, info = env.reset() # Gymnasium returns state, info
         score = 0
@@ -191,13 +240,6 @@ if __name__ == "__main__":
         episode_grad_norms = []
         
         while True: # Loop until episode is done
-            # Ensure state is in the correct shape
-            if isinstance(state, np.ndarray) and len(state.shape) == 3:
-                # Our state shape should be (4, 84, 84) - channels first
-                if state.shape[0] != 4 and state.shape[2] == 4:
-                    # If channels last, transpose to channels first
-                    state = np.transpose(state, (2, 0, 1))
-
             action = agent.select_action(state)
             next_state, reward, terminated, truncated, info = env.step(action)
             # clip reward to [-1,1] for lower variance
@@ -205,13 +247,13 @@ if __name__ == "__main__":
             reward_clipped = max(-1.0, min(1.0, reward_float))  # Manual clipping to avoid np.clip issues with scalars
             done = terminated or truncated # Episode ends if terminated or truncated
 
-            # Again ensure next_state is in the correct shape
-            if isinstance(next_state, np.ndarray) and len(next_state.shape) == 3:
-                if next_state.shape[0] != 4 and next_state.shape[2] == 4:
-                    next_state = np.transpose(next_state, (2, 0, 1))
-
             # Store experience in replay buffer
             agent.step(state, action, reward_clipped, next_state, done)
+
+            state = next_state
+            score += reward_clipped
+            total_steps += 1
+            episode_steps += 1
 
             # Learn after every agent step, as per original paper (if buffer is large enough)
             if len(agent.memory) >= BATCH_SIZE:
@@ -291,13 +333,13 @@ if __name__ == "__main__":
             np.save(os.path.join(LOG_DIR, 'eps_history.npy'), np.array(eps_history))
             np.save(os.path.join(LOG_DIR, 'frames.npy'), np.array([total_steps]))
             model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_frames_{total_steps}.pth")
-            agent.save(model_save_path)
+            agent.save(model_save_path, total_steps=total_steps)
             print(f"Progress checkpoint saved at {total_steps} frames.")
 
         # Save model checkpoint
         if i_episode % SAVE_EVERY == 0:
             model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_episode_{i_episode}.pth")
-            agent.save(model_save_path)
+            agent.save(model_save_path, total_steps=total_steps)
             plt.savefig(os.path.join(LOG_DIR, f'training_plot_episode_{i_episode}.png'))
 
     # End of training loop: close TensorBoard writer

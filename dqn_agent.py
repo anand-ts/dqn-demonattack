@@ -29,7 +29,7 @@ USE_DOUBLE_DQN = True   # enable Double DQN algorithm
 class DQNAgent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, input_shape, num_actions, device, use_double_dqn=USE_DOUBLE_DQN):
+    def __init__(self, input_shape, num_actions, device, use_double_dqn=USE_DOUBLE_DQN, use_noisy=False):
         """Initialize an Agent object.
 
         Params
@@ -38,15 +38,17 @@ class DQNAgent():
             num_actions (int): number of possible actions
             device (torch.device): device to use (cpu or cuda)
             use_double_dqn (bool): whether to use Double DQN algorithm
+            use_noisy (bool): whether to use NoisyNets for exploration
         """
         self.device = device
         self.input_shape = input_shape
         self.num_actions = num_actions
         self.use_double_dqn = use_double_dqn
+        self.use_noisy = use_noisy
 
         # Q-Network
-        self.policy_net = QNetwork(input_shape, num_actions).to(device)
-        self.target_net = QNetwork(input_shape, num_actions).to(device)
+        self.policy_net = QNetwork(input_shape, num_actions, use_noisy=use_noisy).to(device)
+        self.target_net = QNetwork(input_shape, num_actions, use_noisy=use_noisy).to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval() # Target network is only for inference
 
@@ -77,27 +79,13 @@ class DQNAgent():
         self.losses = []
 
     def select_action(self, state):
-        """Returns actions for given state as per current policy (epsilon-greedy)."""
-        # Increment both our agent decision counter for target updates
-        # and our frame counter for epsilon decay
+        """Returns actions for given state as per current policy (epsilon-greedy or NoisyNet)."""
         self.t_step += 1
         self.frame_idx += 1
-        
-        # Epsilon-greedy action selection
-        sample = random.random()
-        
-        # Linear decay for epsilon based on frame index
-        self.epsilon = max(EPSILON_END,
-                          EPSILON_START - (EPSILON_START - EPSILON_END) * self.frame_idx / EPSILON_DECAY)
 
-        if sample > self.epsilon:
-            # Exploit: select the best action
+        if self.use_noisy:
+            # NoisyNet: always greedy, noise handles exploration
             state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-            
-            # Ensure state has the right shape
-            if len(state.shape) == 4 and state.shape[1] != self.input_shape[0]:
-                state = state.permute(0, 3, 1, 2)
-                
             self.policy_net.eval()
             with torch.no_grad():
                 action_values = self.policy_net(state)
@@ -105,8 +93,20 @@ class DQNAgent():
             action = np.argmax(action_values.cpu().data.numpy())
             return action
         else:
-            # Explore: select a random action
-            return random.choice(np.arange(self.num_actions))
+            # Epsilon-greedy
+            sample = random.random()
+            self.epsilon = max(EPSILON_END,
+                              EPSILON_START - (EPSILON_START - EPSILON_END) * self.frame_idx / EPSILON_DECAY)
+            if sample > self.epsilon:
+                state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+                self.policy_net.eval()
+                with torch.no_grad():
+                    action_values = self.policy_net(state)
+                self.policy_net.train()
+                action = np.argmax(action_values.cpu().data.numpy())
+                return action
+            else:
+                return random.choice(np.arange(self.num_actions))
 
     def learn(self, return_stats=False):
         """Update value parameters using given batch of experience tuples. Optionally return stats for logging."""
@@ -165,6 +165,11 @@ class DQNAgent():
 
         self.optimizer.step()
 
+        # Reset NoisyNet noise after each update
+        if self.use_noisy:
+            self.policy_net.reset_noise()
+            self.target_net.reset_noise()
+
         # Update priorities in PER if enabled
         if hasattr(self.memory, "update_priorities") and indices is not None:
             # Use absolute TD errors as priorities
@@ -174,7 +179,7 @@ class DQNAgent():
         # Update target network by hard copy every TARGET_UPDATE_FREQ steps
         if self.t_step % TARGET_UPDATE_FREQ == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
-            print(f"Target network updated at step {self.t_step}. Training is {(self.frame_idx / EPSILON_DECAY) * 100:.1f}% complete.")
+            print(f"Target network updated at step {self.t_step}.")
 
         if return_stats:
             return {
@@ -190,8 +195,8 @@ class DQNAgent():
          # Deprecated soft update (unused)
          pass
 
-    def save(self, filename):
-        """Save the policy network weights."""
+    def save(self, filename, total_steps=None):
+        """Save the policy network weights and optionally total_steps."""
         checkpoint = {
             'policy_state_dict': self.policy_net.state_dict(),
             'target_state_dict': self.target_net.state_dict(),
@@ -202,11 +207,13 @@ class DQNAgent():
             'frame_idx': self.frame_idx,
             'use_double_dqn': self.use_double_dqn
         }
+        if total_steps is not None:
+            checkpoint['total_steps'] = total_steps
         torch.save(checkpoint, filename)
         print(f"Model saved to {filename}")
 
     def load(self, filename):
-        """Load the policy network weights."""
+        """Load the policy network weights. Returns checkpoint dict for extra info (e.g. total_steps)."""
         checkpoint = torch.load(filename, map_location=self.device)
         self.policy_net.load_state_dict(checkpoint['policy_state_dict'])
         self.target_net.load_state_dict(checkpoint['target_state_dict'])
@@ -222,10 +229,10 @@ class DQNAgent():
             self.frame_idx = checkpoint['frame_idx']
         if 'use_double_dqn' in checkpoint:
             self.use_double_dqn = checkpoint['use_double_dqn']
-        
         self.policy_net.eval()
         self.target_net.eval()
         print(f"Model loaded from {filename}")
+        return checkpoint
     def _get_n_step_info(self):
         """Compute n-step return and terminal info from buffer."""
         if self.n_steps == 1: # Should not be called if n_steps is 1
