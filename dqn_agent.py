@@ -108,10 +108,10 @@ class DQNAgent():
             # Explore: select a random action
             return random.choice(np.arange(self.num_actions))
 
-    def learn(self):
-        """Update value parameters using given batch of experience tuples."""
+    def learn(self, return_stats=False):
+        """Update value parameters using given batch of experience tuples. Optionally return stats for logging."""
         if len(self.memory) < BATCH_SIZE:
-            return
+            return None if return_stats else None
 
         # Learning step (noisy nets removed)
         # Sample from replay buffer
@@ -136,7 +136,6 @@ class DQNAgent():
                 # --- Original DQN Target Calculation ---
                 # Get the maximum predicted Q value for the next states from the target network
                 next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
-                
             # Compute Q targets for current states
             q_targets = rewards + (self.gamma * next_q_values * (1 - dones))
 
@@ -148,19 +147,24 @@ class DQNAgent():
         # Mean Squared Error loss
         element_loss = F.mse_loss(q_expected, q_targets, reduction='none')
         loss = (weights * element_loss).mean()
-        
+
         # Store loss for monitoring
         self.losses.append(loss.item())
-        
+
+        # Q-value stats
+        q_values_all = self.policy_net(states).detach().cpu().numpy()
+        q_value_max = np.max(q_values_all)
+        q_value_mean = np.mean(q_values_all)
+
         # Clear gradients and perform optimization step
         self.optimizer.zero_grad()
         loss.backward()
-        
+
         # Gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
-        
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
+
         self.optimizer.step()
-        
+
         # Update priorities in PER if enabled
         if hasattr(self.memory, "update_priorities") and indices is not None:
             # Use absolute TD errors as priorities
@@ -171,6 +175,16 @@ class DQNAgent():
         if self.t_step % TARGET_UPDATE_FREQ == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
             print(f"Target network updated at step {self.t_step}. Training is {(self.frame_idx / EPSILON_DECAY) * 100:.1f}% complete.")
+
+        if return_stats:
+            return {
+                'loss': loss.item(),
+                'td_error_mean': td_errors.abs().mean().item(),
+                'q_value_max': float(q_value_max),
+                'q_value_mean': float(q_value_mean),
+                'grad_norm': float(grad_norm) if hasattr(grad_norm, 'item') else grad_norm
+            }
+        return None
 
     def _update_target_network(self):
          # Deprecated soft update (unused)

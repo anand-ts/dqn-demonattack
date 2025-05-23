@@ -1,4 +1,5 @@
 # main.py
+
 import gymnasium as gym # Use Gymnasium instead of gym
 import torch
 import numpy as np
@@ -8,6 +9,19 @@ from matplotlib.animation import FuncAnimation
 import time
 import os
 import ale_py
+LOG_DIR = "results"     # Directory for logs and plots
+MODEL_DIR = "models"    # Directory for saved models
+
+from torch.utils.tensorboard.writer import SummaryWriter
+from utils import log_training_stats
+
+EPISODE_METRICS_CSV = os.path.join(LOG_DIR, "episode_metrics.csv")
+writer = SummaryWriter(LOG_DIR)
+if not os.path.exists(EPISODE_METRICS_CSV):
+    with open(EPISODE_METRICS_CSV, 'w') as f:
+        f.write(
+            'Episode,Reward,Avg_Reward,Length,Epsilon,Loss,TD_Error_Mean,Q_Value_Max,Q_Value_Mean,Grad_Norm,Learning_Rate,Frames_per_Sec\n'
+        )
 
 # Import from other files
 from dqn_agent import DQNAgent, BATCH_SIZE  # Import BATCH_SIZE from dqn_agent.py
@@ -169,6 +183,12 @@ if __name__ == "__main__":
         score = 0
         episode_steps = 0
         episode_start = time.time()
+
+        # For per-episode stats
+        episode_losses = []
+        episode_td_errors = []
+        episode_q_values = []
+        episode_grad_norms = []
         
         while True: # Loop until episode is done
             # Ensure state is in the correct shape
@@ -177,7 +197,7 @@ if __name__ == "__main__":
                 if state.shape[0] != 4 and state.shape[2] == 4:
                     # If channels last, transpose to channels first
                     state = np.transpose(state, (2, 0, 1))
-            
+
             action = agent.select_action(state)
             next_state, reward, terminated, truncated, info = env.step(action)
             # clip reward to [-1,1] for lower variance
@@ -195,8 +215,19 @@ if __name__ == "__main__":
 
             # Learn after every agent step, as per original paper (if buffer is large enough)
             if len(agent.memory) >= BATCH_SIZE:
-                agent.learn()
-            
+                learn_result = agent.learn(return_stats=True)
+                if learn_result is not None and isinstance(learn_result, dict):
+                    if 'loss' in learn_result:
+                        episode_losses.append(learn_result['loss'])
+                    if 'td_error_mean' in learn_result:
+                        episode_td_errors.append(learn_result['td_error_mean'])
+                    if 'q_value_max' in learn_result:
+                        episode_q_values.append(learn_result['q_value_max'])
+                    if 'q_value_mean' in learn_result:
+                        episode_q_values.append(learn_result['q_value_mean'])
+                    if 'grad_norm' in learn_result:
+                        episode_grad_norms.append(learn_result['grad_norm'])
+
             state = next_state
             score += reward_clipped
             total_steps += 1
@@ -211,19 +242,54 @@ if __name__ == "__main__":
         scores.append(score)              # save most recent score
         eps_history.append(agent.epsilon) # save epsilon value
         avg_scores.append(np.mean(scores_window)) # save average score        # Print progress with completion percentage
+
+        # --- Compute per-episode metrics ---
+        avg_reward = np.mean(scores_window)
+        episode_length = episode_steps
+        epsilon = agent.epsilon
+        loss = np.mean(episode_losses) if episode_losses else ''
+        td_error_mean = np.mean(episode_td_errors) if episode_td_errors else ''
+        q_value_max = np.max(episode_q_values) if episode_q_values else ''
+        q_value_mean = np.mean(episode_q_values) if episode_q_values else ''
+        grad_norm = np.mean(episode_grad_norms) if episode_grad_norms else ''
+        learning_rate = agent.optimizer.param_groups[0]['lr'] if hasattr(agent, 'optimizer') else ''
+        frames_per_sec = episode_steps / (time.time() - episode_start) if episode_steps > 0 else ''
+
+        # --- Log to CSV ---
+        with open(EPISODE_METRICS_CSV, 'a') as f:
+            f.write(f"{i_episode},{score},{avg_reward},{episode_length},{epsilon},{loss},{td_error_mean},{q_value_max},{q_value_mean},{grad_norm},{learning_rate},{frames_per_sec}\n")
+
+        # --- Log to TensorBoard ---
+        writer.add_scalar('Reward/episode', score, i_episode)
+        writer.add_scalar('Reward/avg_100', avg_reward, i_episode)
+        writer.add_scalar('Episode/length', episode_length, i_episode)
+        writer.add_scalar('Epsilon', epsilon, i_episode)
+        if loss != '':
+            writer.add_scalar('Loss', float(loss), i_episode)
+        if td_error_mean != '':
+            writer.add_scalar('TD_Error/mean', float(td_error_mean), i_episode)
+        if q_value_max != '':
+            writer.add_scalar('Q_Value/max', float(q_value_max), i_episode)
+        if q_value_mean != '':
+            writer.add_scalar('Q_Value/mean', float(q_value_mean), i_episode)
+        if grad_norm != '':
+            writer.add_scalar('Grad_Norm', float(grad_norm), i_episode)
+        if learning_rate != '':
+            writer.add_scalar('Learning_Rate', float(learning_rate), i_episode)
+        if frames_per_sec != '':
+            writer.add_scalar('Frames_per_Sec', float(frames_per_sec), i_episode)
+
+
+        # Print progress and save checkpoints
         progress_pct = (total_steps / TOTAL_FRAMES_TO_TRAIN) * 100
-        # Clamp progress_pct to a maximum of 100.0 for display
         display_progress_pct = min(progress_pct, 100.0)
         print(f'Episode {i_episode}\tScore: {score:.1f} | Avg: {np.mean(scores_window):.1f} | Frames: {total_steps}/{TOTAL_FRAMES_TO_TRAIN} ({display_progress_pct:.1f}%) | Eps: {agent.epsilon:.2f}')
-        
+
         # Save a more frequent record of training progress
         if total_steps % 50000 == 0:  # Every 50K frames, save checkpoint and progress
-            # Save current data
             np.save(os.path.join(LOG_DIR, 'scores.npy'), np.array(scores))
             np.save(os.path.join(LOG_DIR, 'eps_history.npy'), np.array(eps_history))
             np.save(os.path.join(LOG_DIR, 'frames.npy'), np.array([total_steps]))
-            
-            # Save checkpoint more frequently based on frames
             model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_frames_{total_steps}.pth")
             agent.save(model_save_path)
             print(f"Progress checkpoint saved at {total_steps} frames.")
@@ -232,9 +298,10 @@ if __name__ == "__main__":
         if i_episode % SAVE_EVERY == 0:
             model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_episode_{i_episode}.pth")
             agent.save(model_save_path)
-            
-            # Save the training plot
             plt.savefig(os.path.join(LOG_DIR, f'training_plot_episode_{i_episode}.png'))
+
+    # End of training loop: close TensorBoard writer
+    writer.close()
 
     print("\nTraining finished.")
     env.close()
