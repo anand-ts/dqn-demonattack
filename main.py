@@ -107,9 +107,16 @@ def make_env(env_id, seed=None, render_mode=None):
 
 # --- Main Training Loop ---
 if __name__ == "__main__":
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Set device, preferring MPS on Apple Silicon
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
+
 
     # Create environment without rendering for training
     env = make_env(ENV_NAME)
