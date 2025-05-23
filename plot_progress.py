@@ -4,7 +4,7 @@ import os
 import argparse
 import glob
 import re
-import pandas as pd
+import pandas as pd  # type: ignore
 
 def extract_numbers(filename):
     """Extract episode number from filename using regex"""

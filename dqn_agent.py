@@ -19,16 +19,17 @@ GAMMA = 0.99            # discount factor
 LR = 2.5e-4             # learning rate (0.00025 as per original)
 FRAME_SKIP_FACTOR = 4   # Define this based on MaxAndSkipObservation setting
 TARGET_UPDATE_FREQ = 10000 // FRAME_SKIP_FACTOR  # Update every 2500 agent steps (10K frames)
-N_STEPS = 1             # multi-step return length (set to 1 for standard DQN)
+N_STEPS = 3             # multi-step return length (set to 3 for n-step returns)
 EPSILON_START = 1.0
 EPSILON_END = 0.1
 EPSILON_DECAY = 1000000 // FRAME_SKIP_FACTOR  # Decay over 250K agent steps (1M frames)
-USE_PRIORITIZED_REPLAY = False  # disable prioritized replay for basic DQN
+USE_PRIORITIZED_REPLAY = True  # ENABLE prioritized replay for PER
+USE_DOUBLE_DQN = True   # enable Double DQN algorithm
 
 class DQNAgent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, input_shape, num_actions, device):
+    def __init__(self, input_shape, num_actions, device, use_double_dqn=USE_DOUBLE_DQN):
         """Initialize an Agent object.
 
         Params
@@ -36,10 +37,12 @@ class DQNAgent():
             input_shape (tuple): dimension of each state (e.g., (4, 84, 84))
             num_actions (int): number of possible actions
             device (torch.device): device to use (cpu or cuda)
+            use_double_dqn (bool): whether to use Double DQN algorithm
         """
         self.device = device
         self.input_shape = input_shape
         self.num_actions = num_actions
+        self.use_double_dqn = use_double_dqn
 
         # Q-Network
         self.policy_net = QNetwork(input_shape, num_actions).to(device)
@@ -51,8 +54,12 @@ class DQNAgent():
         self.optimizer = optim.RMSprop(self.policy_net.parameters(), lr=LR, alpha=0.95, eps=0.01)
         
         # Replay memory
-        self.memory = ReplayBuffer(BUFFER_SIZE, device)
-        self.prioritized = False
+        if USE_PRIORITIZED_REPLAY:
+            self.memory = PrioritizedReplayBuffer(BUFFER_SIZE, device, input_shape)
+            self.prioritized = True
+        else:
+            self.memory = ReplayBuffer(BUFFER_SIZE, device)
+            self.prioritized = False
 
         # Initialize step counters: t_step for target updates, frame_idx for epsilon annealing
         self.t_step = 0
@@ -108,48 +115,28 @@ class DQNAgent():
 
         # Learning step (noisy nets removed)
         # Sample from replay buffer
-        if self.prioritized:
-            try:
-                # The prioritized replay buffer returns 7 values, but we only use what we need
-                sample_output = self.memory.sample(BATCH_SIZE)
-                # Only try to unpack if it's a tuple/list
-                if isinstance(sample_output, (tuple, list)) and len(sample_output) >= 5:
-                    if len(sample_output) == 7:
-                        # Manually extract each element to avoid unpacking issues
-                        states = sample_output[0]
-                        actions = sample_output[1]
-                        rewards = sample_output[2]
-                        next_states = sample_output[3]
-                        dones = sample_output[4]
-                        weights = sample_output[5]
-                        indices = sample_output[6]
-                    else:
-                        # If not 7 elements, assume it's the standard 5-element return
-                        states, actions, rewards, next_states, dones = sample_output
-                        weights = torch.ones_like(rewards)
-                        indices = None
-                else:
-                    # Fallback if prioritized replay returns unexpected format
-                    print("Warning: Prioritized replay returned unexpected format, falling back to standard replay")
-                    states, actions, rewards, next_states, dones = self.memory.sample(BATCH_SIZE)
-                    weights = torch.ones_like(rewards)
-                    indices = None
-            except (ValueError, TypeError) as e:
-                # Handle case where unpacking fails
-                print(f"Warning: Error unpacking prioritized replay: {e}. Using standard format.")
-                states, actions, rewards, next_states, dones = self.memory.sample(BATCH_SIZE)
-                weights = torch.ones_like(rewards)
-                indices = None
-        else:
-            # For standard replay, just get the experiences
-            states, actions, rewards, next_states, dones = self.memory.sample(BATCH_SIZE)
-            # Create dummy weights (all 1's) for uniform weighting of losses
+        sample_output = self.memory.sample(BATCH_SIZE)
+        if isinstance(sample_output, (tuple, list)) and len(sample_output) == 7:
+            states, actions, rewards, next_states, dones, weights, indices = sample_output
+        elif isinstance(sample_output, (tuple, list)) and len(sample_output) == 5:
+            states, actions, rewards, next_states, dones = sample_output
             weights = torch.ones_like(rewards)
+            indices = None
+        else:
+            raise ValueError("Unexpected output from replay buffer sample")
 
-        # --- Original DQN Target Calculation ---
         with torch.no_grad():
-            # Get the maximum predicted Q value for the next states from the target network
-            next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
+            if self.use_double_dqn:
+                # --- Double DQN Target Calculation ---
+                # Get actions from policy network
+                next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
+                # Get Q-values from target network for those actions
+                next_q_values = self.target_net(next_states).gather(1, next_actions)
+            else:
+                # --- Original DQN Target Calculation ---
+                # Get the maximum predicted Q value for the next states from the target network
+                next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
+                
             # Compute Q targets for current states
             q_targets = rewards + (self.gamma * next_q_values * (1 - dones))
 
@@ -174,7 +161,11 @@ class DQNAgent():
         
         self.optimizer.step()
         
-        # (No prioritized replay update)
+        # Update priorities in PER if enabled
+        if hasattr(self.memory, "update_priorities") and indices is not None:
+            # Use absolute TD errors as priorities
+            new_priorities = td_errors.detach().abs().cpu().numpy().flatten()
+            self.memory.update_priorities(indices, new_priorities)  # type: ignore[attr-defined]
 
         # Update target network by hard copy every TARGET_UPDATE_FREQ steps
         if self.t_step % TARGET_UPDATE_FREQ == 0:
@@ -194,7 +185,8 @@ class DQNAgent():
             'losses': self.losses,
             'epsilon': self.epsilon,
             't_step': self.t_step,
-            'frame_idx': self.frame_idx
+            'frame_idx': self.frame_idx,
+            'use_double_dqn': self.use_double_dqn
         }
         torch.save(checkpoint, filename)
         print(f"Model saved to {filename}")
@@ -214,6 +206,8 @@ class DQNAgent():
             self.t_step = checkpoint['t_step']
         if 'frame_idx' in checkpoint:
             self.frame_idx = checkpoint['frame_idx']
+        if 'use_double_dqn' in checkpoint:
+            self.use_double_dqn = checkpoint['use_double_dqn']
         
         self.policy_net.eval()
         self.target_net.eval()
@@ -240,6 +234,17 @@ class DQNAgent():
         return reward, next_state, done
 
     def step(self, state, action, reward, next_state, done):
-        """Process a step: add to replay buffer."""
-        # Simplified step method for 1-step DQN
-        self.memory.push(state, action, reward, next_state, done)
+        """Process a step: add to replay buffer using n-step returns if enabled."""
+        if self.n_steps == 1 or self.n_step_buffer is None:
+            self.memory.push(state, action, reward, next_state, done)
+        else:
+            # Add transition to n-step buffer
+            self.n_step_buffer.append((state, action, reward, next_state, done))
+            # If buffer is full or episode ends, push n-step transition
+            if len(self.n_step_buffer) == self.n_steps or done:
+                reward_n, next_state_n, done_n = self._get_n_step_info()
+                state_0, action_0, _, _, _ = self.n_step_buffer[0]
+                self.memory.push(state_0, action_0, reward_n, next_state_n, done_n)
+            # If episode ends, clear the buffer
+            if done:
+                self.n_step_buffer.clear()

@@ -5,6 +5,7 @@ import os
 import argparse
 import glob
 import seaborn as sns  # type: ignore
+import torch
 from typing import Optional, Dict, Any, List, Union
 
 def load_training_data(csv_file="training_log.csv"):
@@ -20,7 +21,7 @@ def load_training_data(csv_file="training_log.csv"):
         print(f"Error loading CSV: {e}")
         return None
 
-def create_comprehensive_visualization(data, output_dir="./results"):
+def create_comprehensive_visualization(data, output_dir="./results", model_info=None):
     """Create comprehensive visualizations of training data"""
     if data is None or len(data) == 0:
         print("No data to visualize")
@@ -35,7 +36,10 @@ def create_comprehensive_visualization(data, output_dir="./results"):
     
     # 1. Create a dashboard figure with multiple plots
     fig = plt.figure(figsize=(20, 15))
-    fig.suptitle('DQN Training Analysis Dashboard', fontsize=20, y=0.98)
+    title = 'DQN Training Analysis Dashboard'
+    if model_info and 'use_double_dqn' in model_info and model_info['use_double_dqn']:
+        title = 'Double DQN Training Analysis Dashboard'
+    fig.suptitle(title, fontsize=20, y=0.98)
     
     # Define grid for subplots
     gs = fig.add_gridspec(3, 3)
@@ -162,15 +166,25 @@ def main():
     parser = argparse.ArgumentParser(description='Visualize DQN Training Data')
     parser.add_argument('--csv', type=str, default='training_log.csv', help='Path to training log CSV file')
     parser.add_argument('--output', type=str, default='./results', help='Directory for output visualizations')
+    parser.add_argument('--model', type=str, default=None, help='Path to model checkpoint for additional information')
     
     args = parser.parse_args()
     
     # Load training data
     data = load_training_data(args.csv)
     
+    # Load model info if model path is provided
+    model_info = None
+    if args.model and os.path.exists(args.model):
+        try:
+            model_info = torch.load(args.model, map_location='cpu')
+            print("Loaded model information for visualization context")
+        except Exception as e:
+            print(f"Could not load model information: {e}")
+    
     # Generate visualizations
     if data is not None:
-        create_comprehensive_visualization(data, args.output)
+        create_comprehensive_visualization(data, args.output, model_info)
         print(f"Visualizations generated in {args.output}")
     
 if __name__ == "__main__":
