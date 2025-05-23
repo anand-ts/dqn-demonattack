@@ -6,6 +6,8 @@ import time
 import os
 import ale_py
 from matplotlib import animation
+from typing import List, Any, Tuple, Union, Optional
+from matplotlib.artist import Artist
 
 # Import from our project
 from dqn_agent import DQNAgent
@@ -17,8 +19,9 @@ def save_frames_as_gif(frames, path='./results/movie.gif', fps=30):
     patch = plt.imshow(frames[0])
     plt.axis('off')
     
-    def animate(i):
+    def animate(i) -> List[Artist]:
         patch.set_data(frames[i])
+        return [patch]  # Return a list containing the artist
     
     anim = animation.FuncAnimation(plt.gcf(), animate, frames=len(frames), interval=50)
     anim.save(path, writer='pillow', fps=fps)
@@ -29,7 +32,7 @@ def visualize_agent(model_path, num_episodes=3, render_mode='rgb_array'):
     # Create environment with rendering
     env = make_env(ENV_NAME, render_mode=render_mode)
     state_shape = env.observation_space.shape
-    num_actions = env.action_space.n
+    num_actions = env.action_space.n  # type: ignore # Access to Discrete action space's n attribute
     
     # Create agent and load model
     device = torch.device("cpu")  # Use CPU for visualization
@@ -41,7 +44,7 @@ def visualize_agent(model_path, num_episodes=3, render_mode='rgb_array'):
     for i_episode in range(num_episodes):
         state, info = env.reset()
         frames = []
-        score = 0
+        score: float = 0.0  # Initialize as float to avoid type issues
         done = False
         
         while not done:
@@ -56,7 +59,7 @@ def visualize_agent(model_path, num_episodes=3, render_mode='rgb_array'):
             next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             state = next_state
-            score += reward
+            score += float(reward)  # Ensure reward is converted to float
             
             # Add small delay if rendering to screen
             if render_mode == 'human':

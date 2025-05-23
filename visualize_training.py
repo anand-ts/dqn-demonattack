@@ -1,10 +1,11 @@
-import pandas as pd
+import pandas as pd  # type: ignore
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import argparse
 import glob
-import seaborn as sns
+import seaborn as sns  # type: ignore
+from typing import Optional, Dict, Any, List, Union
 
 def load_training_data(csv_file="training_log.csv"):
     """Load training data from CSV file"""

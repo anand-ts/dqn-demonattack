@@ -2,9 +2,11 @@
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-import pandas as pd
+from matplotlib.axes import Axes
+import pandas as pd  # type: ignore
 import os
 import time
+from typing import Optional, Union, List, Any, Tuple
 
 def debug_observation(observation, title="Observation", save_path=None):
     """
@@ -24,7 +26,8 @@ def debug_observation(observation, title="Observation", save_path=None):
             if observation.shape[0] == 1:
                 ax = axes
             else:
-                ax = axes[i]
+                # Fix for "__getitem__" method not defined on type "Axes"
+                ax = axes[i] if isinstance(axes, np.ndarray) else axes
             ax.imshow(observation[i], cmap='gray')
             ax.set_title(f"Channel {i}")
             ax.axis('off')
@@ -36,7 +39,8 @@ def debug_observation(observation, title="Observation", save_path=None):
             if observation.shape[2] == 1:
                 ax = axes
             else:
-                ax = axes[i]
+                # Fix for "__getitem__" method not defined on type "Axes"
+                ax = axes[i] if isinstance(axes, np.ndarray) else axes
             ax.imshow(observation[:,:,i], cmap='gray')
             ax.set_title(f"Channel {i}")
             ax.axis('off')
