@@ -53,25 +53,17 @@ class NoisyLinear(nn.Module):
         return F.linear(input, weight, bias)
 
 class QNetwork(nn.Module):
-    """Actor (Policy) Model."""
+    """Dueling DQN Network."""
 
     def __init__(self, input_shape, num_actions):
-        """Initialize parameters and build model.
-        Params
-        ======
-            input_shape (tuple): Shape of the observation space (e.g., (4, 84, 84))
-            num_actions (int): Number of possible actions
-        """
         super(QNetwork, self).__init__()
         self.input_shape = input_shape
         self.num_actions = num_actions
-        
-        # For frame-stacked Atari, we expect channels to be 4
-        # The first dimension should be the channel dimension
-        channels = input_shape[0]
-        print(f"Using {channels} input channels")
 
-        # CNN layers - following original DQN architecture
+        channels = input_shape[0]
+        print(f"Using {channels} input channels (Dueling DQN)")
+
+        # CNN layers
         self.conv1 = nn.Conv2d(channels, 16, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
 
@@ -82,47 +74,40 @@ class QNetwork(nn.Module):
             o = self.conv2(o)
         conv_out_size = int(np.prod(o.size()))
 
-        # Fully connected layers and output (original DQN)
-        self.fc = nn.Linear(conv_out_size, 256)
-        self.out = nn.Linear(256, num_actions)
-
-    # Removed _get_conv_out as unnecessary
+        # Dueling streams
+        self.fc_adv = nn.Linear(conv_out_size, 256)
+        self.fc_val = nn.Linear(conv_out_size, 256)
+        self.advantage = nn.Linear(256, num_actions)
+        self.value = nn.Linear(256, 1)
 
     def forward(self, x):
-        """Build a network that maps state -> action values."""
         # Input normalization
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
-        
-        # Only print debug info occasionally (0.1% of the time)
-        debug_print = random.random() < 0.0001 # Reduced frequency
+
+        debug_print = random.random() < 0.0001
         if debug_print:
             print(f"Model input shape: {x.shape}")
-        
-        # Handle dimensionality issues - REMOVED complex reshaping.
-        # The input x is expected to be (batch_size, channels, height, width)
-        # e.g., (64, 4, 84, 84) or (1, 4, 84, 84)
+
         if x.dim() != 4:
             print(f"WARNING: Unexpected input dimensions: {x.shape}. Expected 4 dimensions (B, C, H, W).")
-            # Attempt a sensible reshape if it's a single unbatched observation (C, H, W)
             if x.dim() == 3 and x.shape[0] == self.input_shape[0] and x.shape[1] == self.input_shape[1] and x.shape[2] == self.input_shape[2]:
-                x = x.unsqueeze(0) # Add batch dimension
+                x = x.unsqueeze(0)
                 if debug_print: print(f"Reshaped to: {x.shape}")
-            # else: # If other unexpected shapes, it might be better to raise an error or log more verbosely.
-                # For now, we let it pass, and PyTorch will likely raise an error in conv layers if shape is incompatible.
 
-        # Apply convolutional layers
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
-        # Flatten for fully connected layers
         x = x.view(x.size(0), -1)
-        # Fully connected and output
-        x = F.relu(self.fc(x))
-        q_values = self.out(x)
+
+        adv = F.relu(self.fc_adv(x))
+        val = F.relu(self.fc_val(x))
+        adv = self.advantage(adv)
+        val = self.value(val)
+        # Combine streams: Q(s, a) = V(s) + (A(s, a) - mean(A(s, a)))
+        q_values = val + (adv - adv.mean(dim=1, keepdim=True))
         return q_values
-   
+
     def reset_noise(self):
-        """Reset noise in all NoisyLinear layers."""
         for m in self.modules():
             if isinstance(m, NoisyLinear):
                 m.reset_noise()
