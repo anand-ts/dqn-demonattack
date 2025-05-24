@@ -15,7 +15,8 @@ from main import make_env, ENV_NAME
 
 def save_frames_as_gif(frames, path='./results/movie.gif', fps=30):
     """Save a list of frames as a gif"""
-    plt.figure(figsize=(frames[0].shape[1] / 72.0, frames[0].shape[0] / 72.0), dpi=72)
+    # Double the output GIF size
+    plt.figure(figsize=(2 * frames[0].shape[1] / 72.0, 2 * frames[0].shape[0] / 72.0), dpi=72)
     patch = plt.imshow(frames[0])
     plt.axis('off')
     

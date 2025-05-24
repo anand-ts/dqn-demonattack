@@ -1,6 +1,7 @@
 # main.py
 
 import gymnasium as gym # Use Gymnasium instead of gym
+import sys
 import torch
 import numpy as np
 from collections import deque
@@ -9,8 +10,26 @@ from matplotlib.animation import FuncAnimation
 import time
 import os
 import ale_py
+
 LOG_DIR = "results"     # Directory for logs and plots
 MODEL_DIR = "models"    # Directory for saved models
+
+# --- Log all stdout/stderr to a file as well as terminal ---
+class Tee(object):
+    def __init__(self, *files):
+        self.files = files
+    def write(self, obj):
+        for f in self.files:
+            f.write(obj)
+            f.flush()
+    def flush(self):
+        for f in self.files:
+            f.flush()
+
+console_log_path = os.path.join(LOG_DIR, "console.log")
+os.makedirs(LOG_DIR, exist_ok=True)
+sys.stdout = Tee(sys.stdout, open(console_log_path, "a"))
+sys.stderr = Tee(sys.stderr, open(console_log_path, "a"))
 
 from torch.utils.tensorboard.writer import SummaryWriter
 from utils import log_training_stats
@@ -167,40 +186,48 @@ if __name__ == "__main__":
     # Create Agent with the correct shape
     agent = DQNAgent(input_shape=proper_input_shape, num_actions=num_actions, device=device, use_noisy=args.noisy)
 
+    # Set model save directory based on NoisyNets flag
+    if args.noisy:
+        noisy_model_dir = os.path.join(MODEL_DIR, 'noisy_models')
+        os.makedirs(noisy_model_dir, exist_ok=True)
+        model_save_dir = noisy_model_dir
+    else:
+        model_save_dir = MODEL_DIR
+
     # --- Resume logic ---
     resume_episode = 0
     resume_total_steps = 0
     if args.resume is not None:
         print(f"Resuming training from checkpoint: {args.resume}")
         checkpoint = agent.load(args.resume)
-        # Try to parse episode or frame from filename
         import re
         m = re.search(r'episode_(\d+)', args.resume)
         if m:
             resume_episode = int(m.group(1))
-        # Priority: use --resume-frames if provided
+        # Always check for frames.npy if available
+        import numpy as np
+        import os
+        frames_path = os.path.join(LOG_DIR, 'frames.npy')
+        frames_count = None
+        if os.path.exists(frames_path):
+            try:
+                arr = np.load(frames_path)
+                if isinstance(arr, np.ndarray) and arr.size > 0:
+                    frames_count = int(arr[-1])
+            except Exception as e:
+                print(f"Warning: Could not load frames.npy: {e}")
         if args.resume_frames is not None:
             resume_total_steps = int(args.resume_frames)
             print(f"Using manually specified total_steps: {resume_total_steps}")
-        # Otherwise, use total_steps from checkpoint if present
+        elif frames_count is not None:
+            resume_total_steps = frames_count
+            print(f"Using total_steps from frames.npy: {resume_total_steps}")
         elif checkpoint is not None and 'total_steps' in checkpoint:
             resume_total_steps = int(checkpoint['total_steps'])
         else:
             m = re.search(r'frames_(\d+)', args.resume)
             if m:
                 resume_total_steps = int(m.group(1))
-            else:
-                # Fallback: try to load from frames.npy if it exists
-                import numpy as np
-                import os
-                frames_path = os.path.join(LOG_DIR, 'frames.npy')
-                if os.path.exists(frames_path):
-                    try:
-                        arr = np.load(frames_path)
-                        if isinstance(arr, np.ndarray) and arr.size > 0:
-                            resume_total_steps = int(arr[-1])
-                    except Exception as e:
-                        print(f"Warning: Could not load frames.npy: {e}")
         print(f"Resuming from episode {resume_episode}, total_steps {resume_total_steps}")
 
     # Optionally, try to load scores and epsilon history if resuming
@@ -325,22 +352,38 @@ if __name__ == "__main__":
         # Print progress and save checkpoints
         progress_pct = (total_steps / TOTAL_FRAMES_TO_TRAIN) * 100
         display_progress_pct = min(progress_pct, 100.0)
-        print(f'Episode {i_episode}\tScore: {score:.1f} | Avg: {np.mean(scores_window):.1f} | Frames: {total_steps}/{TOTAL_FRAMES_TO_TRAIN} ({display_progress_pct:.1f}%) | Eps: {agent.epsilon:.2f}')
+        elapsed_training_time = time.time() - start_time
+        elapsed_hours, elapsed_rem = divmod(elapsed_training_time, 3600)
+        elapsed_minutes, elapsed_seconds = divmod(elapsed_rem, 60)
+        elapsed_str = f"{int(elapsed_hours):02d}:{int(elapsed_minutes):02d}:{int(elapsed_seconds):02d}"
+        print(f'Episode {i_episode}\tScore: {score:.1f} | Avg: {np.mean(scores_window):.1f} | Frames: {total_steps}/{TOTAL_FRAMES_TO_TRAIN} ({display_progress_pct:.1f}%) | Eps: {agent.epsilon:.2f} | Elapsed: {elapsed_str}')
 
         # Save a more frequent record of training progress
         if total_steps % 50000 == 0:  # Every 50K frames, save checkpoint and progress
             np.save(os.path.join(LOG_DIR, 'scores.npy'), np.array(scores))
             np.save(os.path.join(LOG_DIR, 'eps_history.npy'), np.array(eps_history))
             np.save(os.path.join(LOG_DIR, 'frames.npy'), np.array([total_steps]))
-            model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_frames_{total_steps}.pth")
+            model_save_path = os.path.join(model_save_dir, f"demonattack_dqn_frames_{total_steps}.pth")
             agent.save(model_save_path, total_steps=total_steps)
             print(f"Progress checkpoint saved at {total_steps} frames.")
 
         # Save model checkpoint
         if i_episode % SAVE_EVERY == 0:
-            model_save_path = os.path.join(MODEL_DIR, f"demonattack_dqn_episode_{i_episode}.pth")
+            model_save_path = os.path.join(model_save_dir, f"demonattack_dqn_episode_{i_episode}.pth")
             agent.save(model_save_path, total_steps=total_steps)
+            # --- Generate and save a plot of scores so far ---
+            plt.figure()
+            plt.plot(np.arange(len(scores)), scores)
+            if len(scores) >= 100:
+                moving_avg = np.convolve(scores, np.ones(100)/100, mode='valid')
+                plt.plot(np.arange(len(moving_avg)) + 99, moving_avg, label='Moving Avg (100 episodes)')
+            plt.ylabel('Score')
+            plt.xlabel('Episode #')
+            plt.title(f'DQN Training Scores - {ENV_NAME} (up to ep {i_episode})')
+            plt.legend()
+            plt.tight_layout()
             plt.savefig(os.path.join(LOG_DIR, f'training_plot_episode_{i_episode}.png'))
+            plt.close()
 
     # End of training loop: close TensorBoard writer
     writer.close()
