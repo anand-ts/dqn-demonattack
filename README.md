@@ -1,7 +1,7 @@
 # DQN DemonAttack
 
 <p align="center">
-  <img src="results/episode_2.gif" alt="DQN Agent Playing DemonAttack" width="420"/>
+  <img src="public/episode_2.gif" alt="DQN Agent Playing DemonAttack" width="420"/>
 </p>
 
 <p align="center"><em>(Agent trained after ~800 episodes and 1 million frames)</em></p>

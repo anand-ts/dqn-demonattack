@@ -70,8 +70,8 @@ def visualize_agent(model_path, num_episodes=3, render_mode='rgb_array'):
         
         # Save as gif if using rgb_array
         if render_mode == 'rgb_array' and len(frames) > 0:
-            os.makedirs('./results', exist_ok=True)
-            save_frames_as_gif(frames, f'./results/episode_{i_episode+1}.gif')
+            os.makedirs('./public', exist_ok=True)
+            save_frames_as_gif(frames, f'./public/episode_{i_episode+1}.gif')
     
     env.close()
 
