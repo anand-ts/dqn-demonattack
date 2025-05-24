@@ -1,4 +1,3 @@
-# replay_buffer.py
 import random
 import collections
 import numpy as np

@@ -6,7 +6,10 @@
 
 <p align="center"><em>(Agent trained after ~800 episodes and 1 million frames)</em></p>
 
+
 ## Project Summary
+
+This project follows [DQN: Playing Atari with Deep Reinforcement Learning (Mnih et al., 2013)](https://arxiv.org/abs/1312.5602) as a foundation, which sparked my interest in deep reinforcement learning and inspired this implementation for the DemonAttack Atari environment.
 
 The purpose of this project is to explore and implement a Deep Q-Network (DQN) agent to play the Atari game DemonAttack using modern reinforcement learning techniques. The codebase supports advanced features such as Double DQN, Dueling Networks, Prioritized Experience Replay (PER), n-step returns, and Noisy Networks (NoisyNets) for improved exploration. It is designed for long, resumable training runs with comprehensive logging, checkpointing, and visualization tools.
 

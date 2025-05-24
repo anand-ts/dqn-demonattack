@@ -1,5 +1,3 @@
-# main.py
-
 import gymnasium as gym # Use Gymnasium instead of gym
 import sys
 import torch
