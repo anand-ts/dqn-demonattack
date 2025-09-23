@@ -77,22 +77,41 @@ os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # --- Environment Wrappers (Basic Example) ---
-def make_env(env_id, seed=None, render_mode=None):
+def make_env(env_id, seed=None, render_mode=None, atari_wrappers: bool = False):
     # Create environment with frameskip=1 to disable internal frame skipping
     env = gym.make(env_id, frameskip=1, render_mode=render_mode)
 
     # Common wrappers based on DeepMind paper
     env = gym.wrappers.RecordEpisodeStatistics(env)
     
-    # Manual preprocessing
-    env = gym.wrappers.ResizeObservation(env, (84, 84))
-    env = gym.wrappers.GrayscaleObservation(env)
-    
-    # Frame skipping as per original DQN paper (k=4)
-    env = gym.wrappers.MaxAndSkipObservation(env, skip=4)  # Changed back to 4 as per original paper
-    
-    # Use the renamed FrameStackObservation wrapper
-    env = gym.wrappers.FrameStackObservation(env, 4)
+    if atari_wrappers:
+        # Prefer canonical Atari preprocessing when available
+        try:
+            from gymnasium.wrappers import AtariPreprocessing, FrameStack
+            env = AtariPreprocessing(
+                env,
+                noop_max=30,
+                frame_skip=4,
+                screen_size=84,
+                grayscale_obs=True,
+                terminal_on_life_loss=True,
+                scale_obs=False,
+            )
+            env = FrameStack(env, 4)
+        except Exception as e:
+            print(f"Warning: AtariPreprocessing not available ({e}); falling back to manual wrappers.")
+            env = gym.wrappers.ResizeObservation(env, (84, 84))
+            env = gym.wrappers.GrayscaleObservation(env)
+            env = gym.wrappers.MaxAndSkipObservation(env, skip=4)
+            env = gym.wrappers.FrameStackObservation(env, 4)
+    else:
+        # Manual preprocessing
+        env = gym.wrappers.ResizeObservation(env, (84, 84))
+        env = gym.wrappers.GrayscaleObservation(env)
+        # Frame skipping as per original DQN paper (k=4)
+        env = gym.wrappers.MaxAndSkipObservation(env, skip=4)
+        # Use the renamed FrameStackObservation wrapper
+        env = gym.wrappers.FrameStackObservation(env, 4)
     
     # Create a custom wrapper to transpose the observations to the format PyTorch expects
     class TransposeObservation(gym.ObservationWrapper):
@@ -151,6 +170,12 @@ if __name__ == "__main__":
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint .pth file to resume training')
     parser.add_argument('--resume-frames', type=int, default=None, help='Manually specify total frames when resuming from an old checkpoint')
     parser.add_argument('--noisy', action='store_true', help='Enable NoisyNets for exploration (overrides epsilon-greedy)')
+    # Performance and preprocessing flags
+    parser.add_argument('--atari-wrappers', action='store_true', help='Use AtariPreprocessing + FrameStack wrappers')
+    parser.add_argument('--amp', action='store_true', help='Enable mixed precision (autocast)')
+    parser.add_argument('--compile', dest='compile_model', action='store_true', help='Enable torch.compile() for Q-networks')
+    parser.add_argument('--channels-last', action='store_true', help='Use channels_last memory format for tensors')
+    parser.add_argument('--buffer-size', type=int, default=100000, help='Replay buffer size (default: 100k)')
     args = parser.parse_args()
 
     # Set device, preferring MPS on Apple Silicon
@@ -164,7 +189,7 @@ if __name__ == "__main__":
 
 
     # Create environment without rendering for training
-    env = make_env(ENV_NAME)
+    env = make_env(ENV_NAME, atari_wrappers=args.atari_wrappers)
     state_shape = env.observation_space.shape
     
     # Ensure we can safely access state_shape and action_space.n
@@ -188,7 +213,16 @@ if __name__ == "__main__":
     
 
     # Create Agent with the correct shape
-    agent = DQNAgent(input_shape=proper_input_shape, num_actions=num_actions, device=device, use_noisy=args.noisy)
+    agent = DQNAgent(
+        input_shape=proper_input_shape,
+        num_actions=num_actions,
+        device=device,
+        use_noisy=args.noisy,
+        buffer_size=args.buffer_size,
+        amp=args.amp,
+        compile_model=args.compile_model,
+        channels_last=args.channels_last,
+    )
 
     # Set model save directory based on NoisyNets flag
     if args.noisy:
@@ -286,7 +320,7 @@ if __name__ == "__main__":
             total_steps += 1
             episode_steps += 1
 
-            # Learn after every agent step, as per original paper (if buffer is large enough)
+            # Learn on schedule (agent checks additional conditions internally)
             if len(agent.memory) >= BATCH_SIZE:
                 learn_result = agent.learn(return_stats=True)
                 if learn_result is not None and isinstance(learn_result, dict):
@@ -300,11 +334,6 @@ if __name__ == "__main__":
                         episode_q_values.append(learn_result['q_value_mean'])
                     if 'grad_norm' in learn_result:
                         episode_grad_norms.append(learn_result['grad_norm'])
-
-            state = next_state
-            score += reward_clipped
-            total_steps += 1
-            episode_steps += 1
 
             # Force end episodes after MAX_T steps to avoid infinite loops
             if done or episode_steps >= MAX_T:

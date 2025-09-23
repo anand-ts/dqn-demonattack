@@ -8,6 +8,7 @@ import math
 
 # Import from other files in the same directory
 from model import QNetwork
+from typing import cast
 from replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
 from collections import deque
 
@@ -28,7 +29,12 @@ USE_DOUBLE_DQN = True   # enable Double DQN algorithm
 class DQNAgent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, input_shape, num_actions, device, use_double_dqn=USE_DOUBLE_DQN, use_noisy=False):
+    def __init__(self, input_shape, num_actions, device,
+                 use_double_dqn=USE_DOUBLE_DQN, use_noisy=False,
+                 buffer_size: int | None = None,
+                 amp: bool = False,
+                 compile_model: bool = False,
+                 channels_last: bool = False):
         """Initialize an Agent object.
 
         Params
@@ -44,22 +50,37 @@ class DQNAgent():
         self.num_actions = num_actions
         self.use_double_dqn = use_double_dqn
         self.use_noisy = use_noisy
+        self.use_amp = amp
+        self.channels_last = channels_last
 
         # Q-Network
         self.policy_net = QNetwork(input_shape, num_actions, use_noisy=use_noisy).to(device)
         self.target_net = QNetwork(input_shape, num_actions, use_noisy=use_noisy).to(device)
+        # Channels-last is applied to input tensors; modules remain in default format for compatibility
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval() # Target network is only for inference
 
+        # Optional compile (PyTorch 2.0+)
+        if compile_model:
+            try:
+                self.policy_net = cast(nn.Module, torch.compile(self.policy_net, mode="reduce-overhead"))
+                self.target_net = cast(nn.Module, torch.compile(self.target_net, mode="reduce-overhead"))
+                print("Models compiled with torch.compile().")
+            except Exception as e:
+                print(f"torch.compile not available/failed: {e}")
+
         # Original DQN uses RMSprop optimizer
         self.optimizer = optim.RMSprop(self.policy_net.parameters(), lr=LR, alpha=0.95, eps=0.01)
+        # Optional GradScaler when using CUDA AMP
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.use_amp and self.device.type == "cuda"))
         
         # Replay memory
+        eff_buffer_size = buffer_size if buffer_size is not None else BUFFER_SIZE
         if USE_PRIORITIZED_REPLAY:
-            self.memory = PrioritizedReplayBuffer(BUFFER_SIZE, device, input_shape)
+            self.memory = PrioritizedReplayBuffer(eff_buffer_size, device, input_shape)
             self.prioritized = True
         else:
-            self.memory = ReplayBuffer(BUFFER_SIZE, device)
+            self.memory = ReplayBuffer(eff_buffer_size, device)
             self.prioritized = False
 
         # Initialize step counters: t_step for target updates, frame_idx for epsilon annealing
@@ -85,6 +106,8 @@ class DQNAgent():
         if self.use_noisy:
             # NoisyNet: always greedy, noise handles exploration
             state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+            if self.channels_last:
+                state = state.contiguous(memory_format=torch.channels_last)
             self.policy_net.eval()
             with torch.no_grad():
                 action_values = self.policy_net(state)
@@ -98,6 +121,8 @@ class DQNAgent():
                               EPSILON_START - (EPSILON_START - EPSILON_END) * self.frame_idx / EPSILON_DECAY)
             if sample > self.epsilon:
                 state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+                if self.channels_last:
+                    state = state.contiguous(memory_format=torch.channels_last)
                 self.policy_net.eval()
                 with torch.no_grad():
                     action_values = self.policy_net(state)
@@ -124,27 +149,43 @@ class DQNAgent():
         else:
             raise ValueError("Unexpected output from replay buffer sample")
 
+        # Prepare memory format if requested
+        if self.channels_last:
+            states = states.contiguous(memory_format=torch.channels_last)
+            next_states = next_states.contiguous(memory_format=torch.channels_last)
+
+        # Autocast context for faster matmuls on GPU/MPS
+        device_type = self.device.type
+        autocast_enabled = self.use_amp and device_type in ("cuda", "mps")
+        autocast_kwargs = {"device_type": device_type, "dtype": torch.float16} if autocast_enabled else {}
+
         with torch.no_grad():
-            if self.use_double_dqn:
-                # --- Double DQN Target Calculation ---
-                # Get actions from policy network
-                next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
-                # Get Q-values from target network for those actions
-                next_q_values = self.target_net(next_states).gather(1, next_actions)
+            if autocast_enabled:
+                with torch.autocast(**autocast_kwargs):
+                    if self.use_double_dqn:
+                        next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
+                        next_q_values = self.target_net(next_states).gather(1, next_actions)
+                    else:
+                        next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
             else:
-                # --- Original DQN Target Calculation ---
-                # Get the maximum predicted Q value for the next states from the target network
-                next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
-            # Compute Q targets for current states
+                if self.use_double_dqn:
+                    next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
+                    next_q_values = self.target_net(next_states).gather(1, next_actions)
+                else:
+                    next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
             q_targets = rewards + (self.gamma * next_q_values * (1 - dones))
 
         # Get expected Q values from policy model
-        q_expected = self.policy_net(states).gather(1, actions)
+        if autocast_enabled:
+            with torch.autocast(**autocast_kwargs):
+                q_expected = self.policy_net(states).gather(1, actions)
+        else:
+            q_expected = self.policy_net(states).gather(1, actions)
 
         # Compute element‐wise TD error
         td_errors = q_targets - q_expected
-        # Mean Squared Error loss
-        element_loss = F.mse_loss(q_expected, q_targets, reduction='none')
+        # Huber (Smooth L1) loss is typically more stable for Q-learning
+        element_loss = F.smooth_l1_loss(q_expected, q_targets, reduction='none')
         loss = (weights * element_loss).mean()
 
         # Store loss for monitoring
@@ -156,13 +197,19 @@ class DQNAgent():
         q_value_mean = np.mean(q_values_all)
 
         # Clear gradients and perform optimization step
-        self.optimizer.zero_grad()
-        loss.backward()
-
-        # Gradient clipping to prevent exploding gradients
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
-
-        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.scaler.is_enabled():
+            self.scaler.scale(loss).backward()
+            # Unscale before clipping
+            self.scaler.unscale_(self.optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            loss.backward()
+            # Gradient clipping to prevent exploding gradients
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
+            self.optimizer.step()
 
         # Reset NoisyNet noise after each update
         if self.use_noisy:
