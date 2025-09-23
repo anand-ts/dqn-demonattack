@@ -11,6 +11,9 @@ import ale_py
 
 LOG_DIR = "results"     # Directory for logs and plots
 MODEL_DIR = "models"    # Directory for saved models
+EPISODE_METRICS_CSV = os.path.join(LOG_DIR, "episode_metrics.csv")
+# Placeholder for TensorBoard writer; initialized only when running training
+writer = None  # type: ignore
 
 # --- Log all stdout/stderr to a file as well as terminal ---
 class Tee(object):
@@ -24,21 +27,8 @@ class Tee(object):
         for f in self.files:
             f.flush()
 
-console_log_path = os.path.join(LOG_DIR, "console.log")
-os.makedirs(LOG_DIR, exist_ok=True)
-sys.stdout = Tee(sys.stdout, open(console_log_path, "a"))
-sys.stderr = Tee(sys.stderr, open(console_log_path, "a"))
-
-from torch.utils.tensorboard.writer import SummaryWriter
 from utils import log_training_stats
 
-EPISODE_METRICS_CSV = os.path.join(LOG_DIR, "episode_metrics.csv")
-writer = SummaryWriter(LOG_DIR)
-if not os.path.exists(EPISODE_METRICS_CSV):
-    with open(EPISODE_METRICS_CSV, 'w') as f:
-        f.write(
-            'Episode,Reward,Avg_Reward,Length,Epsilon,Loss,TD_Error_Mean,Q_Value_Max,Q_Value_Mean,Grad_Norm,Learning_Rate,Frames_per_Sec\n'
-        )
 
 # Import from other files
 from dqn_agent import DQNAgent, BATCH_SIZE  # Import BATCH_SIZE from dqn_agent.py
@@ -141,6 +131,22 @@ def make_env(env_id, seed=None, render_mode=None):
 import argparse
 
 if __name__ == "__main__":
+    # Defer heavy/optional imports to runtime so visualize.py can import from this module
+    from torch.utils.tensorboard.writer import SummaryWriter
+    # Ensure directories exist and set up logging/metrics files
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    # Mirror stdout/stderr to file
+    console_log_path = os.path.join(LOG_DIR, "console.log")
+    sys.stdout = Tee(sys.stdout, open(console_log_path, "a"))
+    sys.stderr = Tee(sys.stderr, open(console_log_path, "a"))
+    # Initialize TensorBoard writer and metrics CSV
+    writer = SummaryWriter(LOG_DIR)
+    if not os.path.exists(EPISODE_METRICS_CSV):
+        with open(EPISODE_METRICS_CSV, 'w') as f:
+            f.write(
+                'Episode,Reward,Avg_Reward,Length,Epsilon,Loss,TD_Error_Mean,Q_Value_Max,Q_Value_Mean,Grad_Norm,Learning_Rate,Frames_per_Sec\n'
+            )
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint .pth file to resume training')
     parser.add_argument('--resume-frames', type=int, default=None, help='Manually specify total frames when resuming from an old checkpoint')

@@ -213,7 +213,9 @@ class DQNAgent():
 
     def load(self, filename):
         """Load the policy network weights. Returns checkpoint dict for extra info (e.g. total_steps)."""
-        checkpoint = torch.load(filename, map_location=self.device)
+        # Use safe loading: only tensors/weights are deserialized
+        # This avoids arbitrary code execution via pickle and silences FutureWarning
+        checkpoint = torch.load(filename, map_location=self.device, weights_only=True)
         self.policy_net.load_state_dict(checkpoint['policy_state_dict'])
         self.target_net.load_state_dict(checkpoint['target_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
