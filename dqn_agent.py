@@ -52,6 +52,7 @@ class DQNAgent():
         self.use_noisy = use_noisy
         self.use_amp = amp
         self.channels_last = channels_last
+        self.compiled = False
 
         # Q-Network
         self.policy_net = QNetwork(input_shape, num_actions, use_noisy=use_noisy).to(device)
@@ -63,16 +64,24 @@ class DQNAgent():
         # Optional compile (PyTorch 2.0+)
         if compile_model:
             try:
-                self.policy_net = cast(nn.Module, torch.compile(self.policy_net, mode="reduce-overhead"))
-                self.target_net = cast(nn.Module, torch.compile(self.target_net, mode="reduce-overhead"))
+                # On MPS, Inductor lowering can be unstable; prefer a safer backend
+                backend = "aot_eager" if self.device.type == "mps" else "inductor"
+                # If a backend error occurs at runtime, suppress and fall back to eager
+                self.policy_net = cast(nn.Module, torch.compile(self.policy_net, backend=backend, mode="reduce-overhead"))
+                self.target_net = cast(nn.Module, torch.compile(self.target_net, backend=backend, mode="reduce-overhead"))
                 print("Models compiled with torch.compile().")
+                self.compiled = True
             except Exception as e:
                 print(f"torch.compile not available/failed: {e}")
 
         # Original DQN uses RMSprop optimizer
         self.optimizer = optim.RMSprop(self.policy_net.parameters(), lr=LR, alpha=0.95, eps=0.01)
-        # Optional GradScaler when using CUDA AMP
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.use_amp and self.device.type == "cuda"))
+        # Optional GradScaler when using CUDA AMP (new API)
+        try:
+            from torch.amp.grad_scaler import GradScaler as _GradScaler  # type: ignore
+            self.scaler = _GradScaler("cuda", enabled=(self.use_amp and self.device.type == "cuda"))
+        except Exception:
+            self.scaler = None  # type: ignore
         
         # Replay memory
         eff_buffer_size = buffer_size if buffer_size is not None else BUFFER_SIZE
@@ -106,7 +115,8 @@ class DQNAgent():
         if self.use_noisy:
             # NoisyNet: always greedy, noise handles exploration
             state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-            if self.channels_last:
+            # Workaround: channels_last + compiled on MPS can trigger view/stride issues under torch.compile
+            if self.channels_last and not (self.compiled and self.device.type == "mps"):
                 state = state.contiguous(memory_format=torch.channels_last)
             self.policy_net.eval()
             with torch.no_grad():
@@ -121,7 +131,8 @@ class DQNAgent():
                               EPSILON_START - (EPSILON_START - EPSILON_END) * self.frame_idx / EPSILON_DECAY)
             if sample > self.epsilon:
                 state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-                if self.channels_last:
+                # Workaround: avoid channels_last formatting if compiled on MPS
+                if self.channels_last and not (self.compiled and self.device.type == "mps"):
                     state = state.contiguous(memory_format=torch.channels_last)
                 self.policy_net.eval()
                 with torch.no_grad():
@@ -150,7 +161,8 @@ class DQNAgent():
             raise ValueError("Unexpected output from replay buffer sample")
 
         # Prepare memory format if requested
-        if self.channels_last:
+        # Workaround: avoid channels_last formatting if compiled on MPS
+        if self.channels_last and not (self.compiled and self.device.type == "mps"):
             states = states.contiguous(memory_format=torch.channels_last)
             next_states = next_states.contiguous(memory_format=torch.channels_last)
 
@@ -198,7 +210,7 @@ class DQNAgent():
 
         # Clear gradients and perform optimization step
         self.optimizer.zero_grad(set_to_none=True)
-        if self.scaler.is_enabled():
+        if self.scaler is not None and self.scaler.is_enabled():
             self.scaler.scale(loss).backward()
             # Unscale before clipping
             self.scaler.unscale_(self.optimizer)
@@ -263,10 +275,18 @@ class DQNAgent():
         # Use safe loading: only tensors/weights are deserialized
         # This avoids arbitrary code execution via pickle and silences FutureWarning
         checkpoint = torch.load(filename, map_location=self.device, weights_only=True)
-        self.policy_net.load_state_dict(checkpoint['policy_state_dict'])
-        self.target_net.load_state_dict(checkpoint['target_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # If models are compiled, parameters live under _orig_mod
+        policy_base = getattr(self.policy_net, "_orig_mod", self.policy_net)
+        target_base = getattr(self.target_net, "_orig_mod", self.target_net)
+        policy_base.load_state_dict(checkpoint['policy_state_dict'])
+        target_base.load_state_dict(checkpoint['target_state_dict'])
+        # Loading optimizer state dict across compiled/uncompiled boundaries can mismatch keys;
+        # only attempt if keys are present and shapes align.
+        try:
+            if 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        except Exception as e:
+            print(f"Warning: Skipping optimizer state load due to mismatch: {e}")
         if 'losses' in checkpoint:
             self.losses = checkpoint['losses']
         if 'epsilon' in checkpoint:

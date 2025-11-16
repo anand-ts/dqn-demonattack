@@ -4,6 +4,7 @@ import math
 import torch.nn.functional as F
 import numpy as np
 import random
+import os
 
 # NoisyLinear layer for parameterized exploration (NoisyNet)
 class NoisyLinear(nn.Module):
@@ -91,7 +92,10 @@ class QNetwork(nn.Module):
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
 
-        debug_print = random.random() < 0.0001
+        # Avoid torch.compile graph breaks on MPS by disabling random-based debug
+        debug_print = False
+        if os.getenv("MODEL_DEBUG", "0") == "1":
+            debug_print = random.random() < 0.0001
         if debug_print:
             print(f"Model input shape: {x.shape}")
 
@@ -103,14 +107,23 @@ class QNetwork(nn.Module):
 
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
-        x = x.view(x.size(0), -1)
+        # Ensure standard contiguous (NCHW) memory layout before flattening.
+        # Under torch.compile + channels_last on MPS, reshape may lower to view on an incompatible stride.
+        # Force a real copy into contiguous_format to guarantee valid flatten even if lowered to view.
+        x = x.clone(memory_format=torch.contiguous_format)
+        x = x.view(x.shape[0], -1)
 
         adv = F.relu(self.fc_adv(x))
         val = F.relu(self.fc_val(x))
         adv = self.advantage(adv)
         val = self.value(val)
-        # Combine streams: Q(s, a) = V(s) + (A(s, a) - mean(A(s, a)))
-        q_values = val + (adv - adv.mean(dim=1, keepdim=True))
+
+        # Dueling DQN implementation: Q(s, a) = V(s) + (A(s, a) - mean(A(s, a)))
+        # Explicitly cast to float32 before arithmetic to avoid dtype mismatch with torch.compile on MPS
+        val_f32 = val.to(torch.float32)
+        adv_f32 = adv.to(torch.float32)
+        
+        q_values = val_f32 + (adv_f32 - adv_f32.mean(dim=1, keepdim=True))
         return q_values
 
     def reset_noise(self):

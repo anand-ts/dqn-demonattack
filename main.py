@@ -19,6 +19,7 @@ writer = None  # type: ignore
 class Tee(object):
     def __init__(self, *files):
         self.files = files
+        self._primary = files[0] if files else None
     def write(self, obj):
         for f in self.files:
             f.write(obj)
@@ -26,6 +27,25 @@ class Tee(object):
     def flush(self):
         for f in self.files:
             f.flush()
+    def isatty(self):
+        try:
+            if self._primary is not None and hasattr(self._primary, 'isatty'):
+                return self._primary.isatty()
+        except Exception:
+            pass
+        return False
+    def fileno(self):
+        try:
+            if self._primary is not None and hasattr(self._primary, 'fileno'):
+                return self._primary.fileno()
+        except Exception:
+            pass
+        raise OSError("Tee does not have a valid fileno")
+    def __getattr__(self, name):
+        # Delegate unknown attributes to primary stream for compatibility
+        if self._primary is not None:
+            return getattr(self._primary, name)
+        raise AttributeError(name)
 
 from utils import log_training_stats
 
@@ -151,7 +171,19 @@ import argparse
 
 if __name__ == "__main__":
     # Defer heavy/optional imports to runtime so visualize.py can import from this module
-    from torch.utils.tensorboard.writer import SummaryWriter
+    try:
+        from torch.utils.tensorboard.writer import SummaryWriter as _TBWriter
+        _writer_factory = lambda log_dir: _TBWriter(log_dir)  # type: ignore[assignment]
+    except Exception:
+        # Graceful fallback when tensorboard isn't installed
+        class _NoopWriter:  # type: ignore
+            def __init__(self, *args, **kwargs):
+                print("TensorBoard not available; proceeding without TB logging.")
+            def add_scalar(self, *args, **kwargs):
+                pass
+            def close(self):
+                pass
+        _writer_factory = lambda log_dir: _NoopWriter()  # type: ignore[assignment]
     # Ensure directories exist and set up logging/metrics files
     os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -160,7 +192,7 @@ if __name__ == "__main__":
     sys.stdout = Tee(sys.stdout, open(console_log_path, "a"))
     sys.stderr = Tee(sys.stderr, open(console_log_path, "a"))
     # Initialize TensorBoard writer and metrics CSV
-    writer = SummaryWriter(LOG_DIR)
+    writer = _writer_factory(LOG_DIR)
     if not os.path.exists(EPISODE_METRICS_CSV):
         with open(EPISODE_METRICS_CSV, 'w') as f:
             f.write(
